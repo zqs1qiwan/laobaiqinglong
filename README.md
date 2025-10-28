@@ -7,6 +7,3 @@
 定时规则：0 30 * * * *
 文件后缀：py js
 ```
-
-## 访问量
-![Visitor Count](https://profile-counter.glitch.me/laobaiqinglong/count.svg)
