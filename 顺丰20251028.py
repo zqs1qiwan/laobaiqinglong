@@ -1018,8 +1018,9 @@ class RUN:
         return True
 
     def sendMsg(self, help=False):
-          #send("顺丰-通知", one_msg)
-          pass
+        if self.send_UID:
+            push_res = CHERWIN_TOOLS.wxpusher(self.send_UID, one_msg, APP_NAME, help)
+            print(push_res)
 
 def get_quarter_end_date():
     """计算当前日期所在季度的最后一天"""
