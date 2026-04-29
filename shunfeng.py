@@ -5,8 +5,17 @@
 
 环境变量:
   SF_SIGN         - 从顺丰 App 抓包获取的 sign 参数（多账号用 & 或换行分隔）
+  SF_COOKIES      - 登录后的 cookie 字符串（自动维护，优先级高于 SF_SIGN）
+                    格式: JSESSIONID=xxx;sessionId=xxx;_login_user_id_=xxx;_login_mobile_=xxx
+                    多账号用 & 或换行分隔
   PUSH_PLUS_TOKEN - PushPlus 推送 token（可选）
   BARK_URL        - Bark 推送地址（可选，如 https://api.day.app/xxxxx）
+
+鉴权机制说明:
+  1. sign 是短效凭证（几分钟就过期），用于换取 JSESSIONID session
+  2. JSESSIONID session 是中期凭证（实测可持续数小时甚至更久）
+  3. 本脚本优先使用 SF_COOKIES 中的 session，如果 session 过期才回退到 SF_SIGN
+  4. 每次 sign 登录成功后，自动将 cookies 保存到 SF_COOKIES 环境变量（需要青龙 API）
 """
 
 import hashlib
@@ -29,16 +38,23 @@ requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
 # ============ 常量 ============
 BASE_URL = "https://mcs-mimp-web.sf-express.com"
+SHARE_LOGIN_PATH = "/mcs-mimp/share/app/shareLogin"
 LOGIN_PATH = "/mcs-mimp/share/app/activityRedirect"
+IF_LOGIN_PATH = "/mcs-mimp/ifLogin"
 API_POST_PATH = "/mcs-mimp/commonPost/"
 API_ROUTE_POST_PATH = "/mcs-mimp/commonRoutePost/"
 API_NO_LOGIN_POST_PATH = "/mcs-mimp/commonNoLoginPost/"
 SYS_CODE = "MCS-MIMP-CORE"
 SIGN_TOKEN = "wwesldfs29aniversaryvdld29"
 SW8_APP_CODE = "fb40817085be4e398e0b6f4b08177746"
-USER_AGENT = "SFMainland_Store_Pro/9.86.0.5 CFNetwork/3860.200.71 Darwin/25.1.0"
+USER_AGENT = "SFMainland_Store_Pro/9.89.0.1 CFNetwork/3860.500.112 Darwin/25.4.0"
 
 CST = timezone(timedelta(hours=8))
+
+# 青龙面板 API（用于自动更新环境变量）
+QL_URL = os.environ.get("QL_URL", "http://localhost:5700")
+QL_CLIENT_ID = os.environ.get("QL_CLIENT_ID", "")
+QL_CLIENT_SECRET = os.environ.get("QL_CLIENT_SECRET", "")
 
 
 # ============ 工具函数 ============
@@ -71,6 +87,75 @@ def gen_device_id():
     for c in "xxxxxxxx-xxxx-xxxx":
         result += random.choice(chars) if c == "x" else c
     return result
+
+
+# ============ 青龙面板 API ============
+
+def ql_get_token():
+    """获取青龙面板 API token"""
+    if not QL_CLIENT_ID or not QL_CLIENT_SECRET:
+        return None
+    try:
+        resp = requests.get(
+            f"{QL_URL}/open/auth/token",
+            params={"client_id": QL_CLIENT_ID, "client_secret": QL_CLIENT_SECRET},
+            timeout=10,
+        )
+        data = resp.json()
+        if data.get("code") == 200:
+            return data["data"]["token"]
+    except Exception as e:
+        log(f"  获取青龙 token 失败: {e}")
+    return None
+
+
+def ql_update_env(name, value, remarks=""):
+    """更新或创建青龙环境变量"""
+    token = ql_get_token()
+    if not token:
+        log(f"  ⚠ 无法更新环境变量 {name}（未配置青龙 API）")
+        return False
+
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+    try:
+        # 查找现有变量
+        resp = requests.get(
+            f"{QL_URL}/open/envs",
+            params={"searchValue": name},
+            headers=headers,
+            timeout=10,
+        )
+        envs = resp.json().get("data", [])
+        existing = [e for e in envs if e.get("name") == name]
+
+        if existing:
+            # 更新现有变量
+            env_id = existing[0]["id"]
+            resp = requests.put(
+                f"{QL_URL}/open/envs",
+                headers=headers,
+                json={"id": env_id, "name": name, "value": value, "remarks": remarks or existing[0].get("remarks", "")},
+                timeout=10,
+            )
+        else:
+            # 创建新变量
+            resp = requests.post(
+                f"{QL_URL}/open/envs",
+                headers=headers,
+                json=[{"name": name, "value": value, "remarks": remarks}],
+                timeout=10,
+            )
+
+        result = resp.json()
+        if result.get("code") == 200:
+            log(f"  ✅ 环境变量 {name} 已更新")
+            return True
+        else:
+            log(f"  ⚠ 更新环境变量失败: {result}")
+    except Exception as e:
+        log(f"  ⚠ 更新环境变量异常: {e}")
+    return False
 
 
 # ============ 推送通知 ============
@@ -109,8 +194,13 @@ def push_notification(title, content):
 # ============ SF Express 客户端 ============
 
 class SFClient:
-    def __init__(self, sign_param, index=1):
-        self.sign_param = sign_param.strip()
+    def __init__(self, auth_param, index=1, auth_type="sign"):
+        """
+        auth_param: sign 字符串或 cookie 字符串
+        auth_type: "sign" 或 "cookies"
+        """
+        self.auth_param = auth_param.strip()
+        self.auth_type = auth_type
         self.index = index
         self.session = requests.Session()
         self.session.verify = False
@@ -118,10 +208,10 @@ class SFClient:
         self.logged_in = False
         self.mobile = ""
         self.user_id = ""
-        self.report_lines = []  # 收集通知内容
+        self.cookies_str = ""
+        self.report_lines = []
 
     def _report(self, msg):
-        """记录到日志和通知"""
         log(msg)
         self.report_lines.append(msg)
 
@@ -130,13 +220,109 @@ class SFClient:
             return mobile[:3] + "****" + mobile[-4:]
         return mobile or "未知"
 
+    # ---- Cookie 序列化 ----
+
+    def _export_cookies(self):
+        """导出当前 session 的关键 cookies 为字符串"""
+        cookie_dict = self.session.cookies.get_dict()
+        key_cookies = ["JSESSIONID", "sessionId", "_login_user_id_", "_login_mobile_"]
+        parts = []
+        for k in key_cookies:
+            if k in cookie_dict:
+                parts.append(f"{k}={cookie_dict[k]}")
+        return "; ".join(parts)
+
+    def _import_cookies(self, cookies_str):
+        """从字符串导入 cookies 到 session"""
+        for part in cookies_str.split(";"):
+            part = part.strip()
+            if "=" in part:
+                name, value = part.split("=", 1)
+                self.session.cookies.set(name.strip(), value.strip())
+
     # ---- 登录 ----
 
-    def login(self):
-        """通过 activityRedirect + sign 换取 session cookie"""
-        params = {"sign": self.sign_param, "source": "SFAPP", "bizCode": "622"}
+    def login_with_cookies(self):
+        """使用已有 cookies 验证登录状态"""
+        log(f"账号{self.index}: 尝试使用缓存 cookies 登录...")
+        self._import_cookies(self.auth_param)
+
+        try:
+            resp = self.session.post(
+                f"{BASE_URL}{IF_LOGIN_PATH}",
+                headers={"User-Agent": USER_AGENT, "Content-Type": "application/json"},
+                json={},
+                timeout=15,
+            )
+            data = resp.json()
+            if data.get("success") and data.get("obj", {}).get("loginStatus") == 1:
+                self.mobile = data["obj"].get("mobile", "").replace("*", "")
+                self.user_id = self.session.cookies.get("_login_user_id_", "")
+                full_mobile = self.session.cookies.get("_login_mobile_", "")
+                self.logged_in = True
+                self._report(
+                    f"👤 账号{self.index}:【{self._mask_mobile(full_mobile)}】Cookie 登录成功"
+                )
+                self.cookies_str = self.auth_param
+                return True
+            else:
+                log(f"  Cookies 已过期: {data.get('errorMessage', 'loginStatus != 1')}")
+                return False
+        except Exception as e:
+            log(f"  Cookie 登录异常: {e}")
+            return False
+
+    def login_with_sign(self):
+        """通过 shareLogin + sign 获取 session（Cat-zaizai 方案）"""
+        log(f"账号{self.index}: 正在通过 shareLogin + sign 登录...")
+
+        for attempt in range(2):
+            try:
+                resp = self.session.get(
+                    f"{BASE_URL}{SHARE_LOGIN_PATH}",
+                    params={"sign": self.auth_param, "source": "SFAPP", "bizCode": "622"},
+                    headers={
+                        "User-Agent": USER_AGENT,
+                        "content-type": "application/json",
+                    },
+                    timeout=15,
+                )
+                data = resp.json()
+
+                if data.get("success"):
+                    obj = data.get("obj", {})
+                    self.user_id = obj.get("userId", "")
+                    token = obj.get("token", "")
+                    # shareLogin 返回的 cookies
+                    cookies = self.session.cookies.get_dict()
+                    self.mobile = cookies.get("_login_mobile_", "")
+
+                    if self.user_id:
+                        self.logged_in = True
+                        self.cookies_str = self._export_cookies()
+                        self._report(
+                            f"👤 账号{self.index}:【{self._mask_mobile(self.mobile)}】shareLogin 登录成功"
+                        )
+                        return True
+                    else:
+                        log(f"  shareLogin 成功但无 userId")
+                else:
+                    err_msg = data.get("errorMessage", "unknown")
+                    log(f"  shareLogin 失败: {err_msg}")
+            except Exception as e:
+                log(f"  shareLogin 异常 (第{attempt + 1}次): {e}")
+                if attempt == 0:
+                    time.sleep(2)
+                    continue
+
+        # 回退到 activityRedirect
+        return self.login_with_redirect()
+
+    def login_with_redirect(self):
+        """通过 activityRedirect + sign 换取 session cookie（原始方案）"""
+        log(f"账号{self.index}: 回退到 activityRedirect 登录...")
+        params = {"sign": self.auth_param, "source": "SFAPP", "bizCode": "622"}
         url = f"{BASE_URL}{LOGIN_PATH}"
-        log(f"账号{self.index}: 正在通过 sign 登录...")
 
         for attempt in range(2):
             try:
@@ -155,12 +341,13 @@ class SFClient:
 
                     if jsession and self.user_id:
                         self.logged_in = True
+                        self.cookies_str = self._export_cookies()
                         self._report(
-                            f"👤 账号{self.index}:【{self._mask_mobile(self.mobile)}】登录成功"
+                            f"👤 账号{self.index}:【{self._mask_mobile(self.mobile)}】redirect 登录成功"
                         )
                         return True
                     else:
-                        log(f"  登录返回 302 但未获取到有效 cookie: {list(cookies.keys())}")
+                        log(f"  302 但无有效 cookie: {list(cookies.keys())}")
                 elif resp.status_code == 200:
                     try:
                         err = resp.json()
@@ -174,13 +361,24 @@ class SFClient:
                 else:
                     log(f"  登录返回 HTTP {resp.status_code}")
             except Exception as e:
-                log(f"  登录异常 (第{attempt+1}次): {e}")
+                log(f"  登录异常 (第{attempt + 1}次): {e}")
                 if attempt == 0:
                     time.sleep(2)
                     continue
 
-        self._report(f"❌ 账号{self.index}: 登录失败，请检查 sign 是否有效")
+        self._report(f"❌ 账号{self.index}: 所有登录方式均失败，请更新 sign")
         return False
+
+    def login(self):
+        """智能登录：优先 cookies，失败则用 sign"""
+        if self.auth_type == "cookies":
+            if self.login_with_cookies():
+                return True
+            # cookies 过期，没有 sign 可以回退
+            self._report(f"❌ 账号{self.index}: Cookies 已过期，请更新 SF_SIGN 重新登录")
+            return False
+        else:
+            return self.login_with_sign()
 
     # ---- 通用请求 ----
 
@@ -209,7 +407,7 @@ class SFClient:
                 resp = self.session.post(url, json=body, headers=headers, timeout=30)
                 return resp.json()
             except Exception as e:
-                log(f"  请求失败 [{service_path}] (第{attempt+1}次): {e}")
+                log(f"  请求失败 [{service_path}] (第{attempt + 1}次): {e}")
                 if attempt == 0 and retry:
                     time.sleep(2)
         return None
@@ -217,10 +415,11 @@ class SFClient:
     # ---- 签到 ----
 
     def do_sign(self):
-        """执行每日签到（v2 接口）"""
+        """执行每日签到（automaticSignFetchPackage 接口，更稳定）"""
         self._report("🎯 开始签到...")
         data = self._api_post(
-            "~memberNonactivity~integralSignV2Service~sign", {}
+            "~memberNonactivity~integralTaskSignPlusService~automaticSignFetchPackage",
+            {"comeFrom": "vioin", "channelFrom": "SFAPP"},
         )
         if not data:
             self._report("  ❌ 签到请求失败")
@@ -228,23 +427,20 @@ class SFClient:
 
         if data.get("success"):
             obj = data.get("obj", {})
-            day_count = obj.get("dayCount", 0)
-            total_count = obj.get("totalCount", 0)
-            award_type = obj.get("awardType", "")
-            award_num = obj.get("awardNum", 0)
-            award = obj.get("award", {})
-            products = award.get("productDTOList", []) if award else []
-            product_names = [p.get("productName", "") for p in products if p.get("productName")]
+            has_finish = obj.get("hasFinishSign", 0)
+            count_day = obj.get("countDay", 0)
+            packages = obj.get("integralTaskSignPackageVOList", [])
+            pkg_names = [p.get("packetName", "") for p in packages if p.get("packetName")]
 
-            msg = f"  ✅ 签到成功! 连续签到 {day_count} 天 (累计 {total_count} 天)"
-            if award_num > 0:
-                msg += f" | 获得 {award_type} x{award_num}"
-            if product_names:
-                msg += f" | 奖品: {', '.join(product_names)}"
+            if has_finish == 1:
+                msg = f"  📝 今日已签到，连续签到 {count_day} 天"
+            else:
+                msg = f"  ✅ 签到成功! 连续签到 {count_day} 天"
+            if pkg_names:
+                msg += f" | 礼包: {', '.join(pkg_names)}"
             self._report(msg)
         else:
             err_msg = data.get("errorMessage", "未知错误")
-            # "已签到" 类的不算错误
             if "已" in err_msg and "签" in err_msg:
                 self._report(f"  📝 {err_msg}")
             else:
@@ -447,8 +643,10 @@ class SFClient:
 
     def get_report(self):
         return {
-            "account": self._mask_mobile(self.mobile) or f"账号{self.index}",
+            "account": self._mask_mobile(self.session.cookies.get("_login_mobile_", self.mobile)) or f"账号{self.index}",
             "lines": self.report_lines,
+            "cookies": self.cookies_str,
+            "logged_in": self.logged_in,
         }
 
 
@@ -456,43 +654,76 @@ class SFClient:
 
 def main():
     log("=" * 50)
-    log("🚚 顺丰速运签到脚本 v2.0")
+    log("🚚 顺丰速运签到脚本 v3.0 (Cookie 持久化)")
     log("=" * 50)
 
-    sf_sign = os.environ.get("SF_SIGN", "")
-    if not sf_sign:
-        log("❌ 未设置 SF_SIGN 环境变量!")
+    # 优先使用 SF_COOKIES，然后回退到 SF_SIGN
+    sf_cookies = os.environ.get("SF_COOKIES", "").strip()
+    sf_sign = os.environ.get("SF_SIGN", "").strip()
+
+    if not sf_cookies and not sf_sign:
+        log("❌ 未设置 SF_SIGN 或 SF_COOKIES 环境变量!")
         log("   请从顺丰 App 抓包获取 sign 参数:")
         log("   1. 打开顺丰 App → 我的 → 会员中心 → 积分")
-        log("   2. 抓包找到 activityRedirect 请求")
+        log("   2. 抓包找到 activityRedirect 或 shareLogin 请求")
         log("   3. 复制 URL 中 sign= 后面的值")
         log("   4. 设置环境变量 SF_SIGN=你的sign值")
         log("   5. 多账号用 & 或换行分隔")
         sys.exit(1)
 
-    # 解析多账号（支持 & 或换行分隔）
-    accounts = re.split(r"[&\n]", sf_sign)
-    accounts = [a.strip() for a in accounts if a.strip()]
-    log(f"📝 共 {len(accounts)} 个账号")
+    # 构建账号列表：[(auth_param, auth_type), ...]
+    accounts = []
+
+    if sf_cookies:
+        cookie_list = re.split(r"[&\n]", sf_cookies)
+        cookie_list = [a.strip() for a in cookie_list if a.strip()]
+        for c in cookie_list:
+            accounts.append((c, "cookies"))
+        log(f"📝 从 SF_COOKIES 加载 {len(cookie_list)} 个账号")
+
+    if sf_sign and not accounts:
+        sign_list = re.split(r"[&\n]", sf_sign)
+        sign_list = [a.strip() for a in sign_list if a.strip()]
+        for s in sign_list:
+            accounts.append((s, "sign"))
+        log(f"📝 从 SF_SIGN 加载 {len(sign_list)} 个账号")
+
+    if not accounts:
+        log("❌ 没有有效的账号信息")
+        sys.exit(1)
 
     all_reports = []
-    for i, sign in enumerate(accounts, 1):
+    new_cookies = []  # 收集所有成功登录的 cookies
+
+    for i, (auth_param, auth_type) in enumerate(accounts, 1):
         try:
-            client = SFClient(sign, i)
+            client = SFClient(auth_param, i, auth_type)
             report = client.run()
             all_reports.append(report)
+
+            # 收集有效 cookies
+            if report.get("logged_in") and report.get("cookies"):
+                new_cookies.append(report["cookies"])
         except Exception as e:
             log(f"❌ 账号{i} 执行异常: {e}")
             traceback.print_exc()
             all_reports.append({
                 "account": f"账号{i}",
                 "lines": [f"❌ 执行异常: {e}"],
+                "cookies": "",
+                "logged_in": False,
             })
 
         if i < len(accounts):
             delay = random.uniform(3, 5)
             log(f"⏳ 等待 {delay:.1f} 秒...")
             time.sleep(delay)
+
+    # 保存有效的 cookies 到环境变量（用于下次运行）
+    if new_cookies:
+        cookies_value = "&".join(new_cookies)
+        log(f"\n🔑 保存 {len(new_cookies)} 个账号的 cookies...")
+        ql_update_env("SF_COOKIES", cookies_value, "顺丰签到-自动维护的cookies")
 
     # 汇总
     summary_lines = [
@@ -501,7 +732,7 @@ def main():
         "",
     ]
     for report in all_reports:
-        summary_lines.append(f"{'='*40}")
+        summary_lines.append(f"{'=' * 40}")
         summary_lines.append(f"👤 {report['account']}")
         summary_lines.extend(report["lines"])
         summary_lines.append("")
