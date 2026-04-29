@@ -12,27 +12,28 @@
 
 ### 功能说明
 
-- ✅ 每日自动签到（积分签到 v2 接口）
+- ✅ 每日自动签到（积分签到接口）
 - ✅ 超值福利签到领红包
 - ✅ 自动完成积分任务（浏览类任务）并领取奖励
 - ✅ 批量领取任务奖励
 - ✅ 生活特权自动领券
 - ✅ 签到后查询积分余额
-- ✅ 支持多账号（环境变量用 `&` 或换行分隔）
+- ✅ 支持多账号（环境变量用换行分隔，每行一个账号的完整 cookie）
 - ✅ 通知推送（PushPlus / Bark）
+- ✅ 自动更新 cookies 到青龙环境变量
 - ✅ 纯 Python 3 实现，无需 Node.js
 
 ### 使用方法
 
-#### 1. 获取 sign 参数
+#### 1. 获取 Cookie
 
 1. 手机安装抓包工具（如 Stream、Charles、HttpCanary）
-2. 打开**顺丰速运 App** → **我的** → **会员中心** → **积分**
-3. 在抓包工具中找到以下请求：
+2. 打开**顺丰速运 App**，进入任意页面
+3. 在抓包工具中找到 `mcs-mimp-web.sf-express.com` 的请求
+4. 复制请求头中的 **Cookie** 值，格式如下：
    ```
-   GET https://mcs-mimp-web.sf-express.com/mcs-mimp/share/app/activityRedirect?sign=xxx&source=SFAPP&bizCode=622
+   JSESSIONID=xxx; sessionId=xxx; _login_user_id_=xxx; _login_mobile_=xxx
    ```
-4. 复制 URL 中 `sign=` 后面的值（到下一个 `&` 之前的部分）
 
 #### 2. 配置环境变量
 
@@ -40,9 +41,15 @@
 
 | 变量名 | 说明 | 必填 |
 |--------|------|------|
-| `SF_SIGN` | 抓包获取的 sign 值，多账号用 `&` 或换行分隔 | ✅ |
+| `SF_COOKIES` | 抓包获取的完整 Cookie 字符串，多账号用换行分隔 | ✅ |
 | `PUSH_PLUS_TOKEN` | PushPlus 推送 token | 可选 |
 | `BARK_URL` | Bark 推送地址（如 `https://api.day.app/xxxxx`） | 可选 |
+
+**多账号格式**（每行一个账号的完整 cookie）：
+```
+JSESSIONID=xxx1; sessionId=xxx1; _login_user_id_=xxx1; _login_mobile_=xxx1
+JSESSIONID=xxx2; sessionId=xxx2; _login_user_id_=xxx2; _login_mobile_=xxx2
+```
 
 #### 3. 运行
 
@@ -50,12 +57,8 @@
 
 也可以在青龙面板手动运行测试。
 
-### sign 有效期
+### Cookie 有效期
 
-- sign 有效期一般为 **数周到数月**，取决于服务器端策略
-- 当脚本日志出现 **"sign 可能已过期，请重新抓包"** 时，需要重复上述抓包步骤获取新的 sign
-- 建议定期检查运行日志，确保签到正常
-
-### 旧脚本说明
-
-旧的 `顺丰20251028.py` 已停用，由 `shunfeng.py` 替代。新脚本采用 `activityRedirect` 接口自动登录，不再依赖手动 cookie 或微信扫码。
+- JSESSIONID 有效期取决于服务器端 session 策略，通常可维持数小时到数天
+- 每次脚本运行成功后会自动更新 cookies 到青龙环境变量，延长有效期
+- 当脚本日志出现 **"SF_COOKIES 已过期，请重新抓包更新"** 时，需要重新抓包获取新的 Cookie
