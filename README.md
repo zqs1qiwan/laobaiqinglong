@@ -8,7 +8,60 @@
 文件后缀：py
 ```
 
-## 顺丰签到脚本（shunfeng.py）
+## 中国联通签到（chinaUnicom.py）
+
+### 功能说明
+
+- ✅ 首页签到（话费红包/积分）
+- ✅ 联通祝福（各类抽奖）
+- ✅ 天天领现金（每日打卡/立减金）
+- ✅ 权益超市（任务/抽奖/浇水/领奖）
+- ✅ 安全管家（日常任务/积分领取）
+- ✅ 联通云盘（签到/AI互动/文件上传/抽奖）
+- ✅ 联通阅读（心跳阅读/抽奖/查红包）
+- ✅ 联通爱听（积分任务/自动签到/阅读挂机）
+- ✅ 沃云手机（签到/任务/抽奖）
+- ✅ 区域专区（新疆/河南/云南特有任务）
+- ✅ 支持多账号（`&` 或换行分隔）
+- ✅ 纯 Python 3 实现，依赖 `pycryptodome`、`requests`
+
+### 使用方法
+
+#### 1. 配置环境变量
+
+在青龙面板 → **环境变量** 中添加：
+
+| 变量名 | 说明 | 必填 |
+|--------|------|------|
+| `chinaUnicomCookie` | Token#AppId 或 手机号#密码 | ✅ |
+| `UNICOM_PROXY_API` | 代理提取链接（支持 JSON/TXT） | 可选 |
+| `UNICOM_GRAB_AMOUNT` | 抢兑面额，默认 `5` | 可选 |
+
+**多账号格式**（`&` 或换行分隔）：
+```
+token1#appId1&token2#appId2
+```
+
+#### 2. 定时规则建议
+
+```
+0 7,20 * * *   # 每天早晚各跑一次（推荐）
+0 58 9,17 * * * # 抢兑专用（需开启 run_grab_coupon）
+```
+
+### Python 依赖
+
+```
+pycryptodome
+requests
+```
+
+---
+
+## ~~顺丰签到（shunfeng.py）~~ *(已归档，暂不可用)*
+
+<details>
+<summary>点击展开历史说明</summary>
 
 ### 功能说明
 
@@ -23,21 +76,7 @@
 - ✅ 自动更新 cookies 到青龙环境变量
 - ✅ 纯 Python 3 实现，无需 Node.js
 
-### 使用方法
-
-#### 1. 获取 Cookie
-
-1. 手机安装抓包工具（如 Stream、Charles、HttpCanary）
-2. 打开**顺丰速运 App**，进入任意页面
-3. 在抓包工具中找到 `mcs-mimp-web.sf-express.com` 的请求
-4. 复制请求头中的 **Cookie** 值，格式如下：
-   ```
-   JSESSIONID=xxx; sessionId=xxx; _login_user_id_=xxx; _login_mobile_=xxx
-   ```
-
-#### 2. 配置环境变量
-
-在青龙面板 → **环境变量** 中添加：
+### 环境变量
 
 | 变量名 | 说明 | 必填 |
 |--------|------|------|
@@ -45,20 +84,14 @@
 | `PUSH_PLUS_TOKEN` | PushPlus 推送 token | 可选 |
 | `BARK_URL` | Bark 推送地址（如 `https://api.day.app/xxxxx`） | 可选 |
 
-**多账号格式**（每行一个账号的完整 cookie）：
-```
-JSESSIONID=xxx1; sessionId=xxx1; _login_user_id_=xxx1; _login_mobile_=xxx1
-JSESSIONID=xxx2; sessionId=xxx2; _login_user_id_=xxx2; _login_mobile_=xxx2
-```
+### Cookie 获取
 
-#### 3. 运行
+1. 手机安装抓包工具（如 Stream、Charles、HttpCanary）
+2. 打开**顺丰速运 App**，进入任意页面
+3. 在抓包工具中找到 `mcs-mimp-web.sf-express.com` 的请求
+4. 复制请求头中的 **Cookie** 值：
+   ```
+   JSESSIONID=xxx; sessionId=xxx; _login_user_id_=xxx; _login_mobile_=xxx
+   ```
 
-脚本默认定时 `1 7 * * *`（每天早上 7:01 执行）。
-
-也可以在青龙面板手动运行测试。
-
-### Cookie 有效期
-
-- JSESSIONID 有效期取决于服务器端 session 策略，通常可维持数小时到数天
-- 每次脚本运行成功后会自动更新 cookies 到青龙环境变量，延长有效期
-- 当脚本日志出现 **"SF_COOKIES 已过期，请重新抓包更新"** 时，需要重新抓包获取新的 Cookie
+</details>
